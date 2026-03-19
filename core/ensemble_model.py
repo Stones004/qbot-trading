@@ -41,7 +41,7 @@ class EnsembleModel:
         self.meta            = LogisticRegression(
             max_iter=2000, C=0.3,          # stronger regularisation
             class_weight='balanced',        # fix label imbalance
-            solver='lbfgs', multi_class='auto'
+            solver='lbfgs'
         )
         self.models          = self._init_models()
         self.is_fitted       = False
