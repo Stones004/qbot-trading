@@ -266,15 +266,7 @@ else:
         print(f"  {tag} {fix}")
         info(f"      Why: {reason}")
 
-print(f"\n{SEP}\n  Diagnostics complete.\n{SEP}\n")"""
-diagnose.py — Run this first to find exactly why Sharpe is 0 or negative.
-
-Usage:
-    python diagnose.py
-
-It will print a full report of every stage: data, features, labels,
-model training, signal distribution, and backtest results.
-"""
+print(f"\n{SEP}\n  Diagnostics complete.\n{SEP}\n")
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
