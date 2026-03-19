@@ -1144,91 +1144,129 @@ window.runBacktest = async function() {
 };
 
 function renderRealResults(data) {
-  const m = data.metrics || {};
+  const m   = data.metrics || {};
+  const cap = parseFloat(document.getElementById('sl-capital').value) || 100000;
 
   // Metric cards
-  const sharpe = m.sharpe ?? 0;
-  setMetric('m-sharpe', sharpe.toFixed(2), sharpe>1.5?'good':sharpe>1?'warn':'bad',
-    'm-sharpe-sub', sharpe>1.5?'Excellent':sharpe>1?'Good':'Below target');
-  setMetric('m-return', (m.total_return>=0?'+':'')+m.total_return+'%', m.total_return>=0?'good':'bad',
-    'm-cagr', 'CAGR: '+(m.cagr>=0?'+':'')+m.cagr+'%');
-  setMetric('m-dd', m.max_drawdown+'%', parseFloat(m.max_drawdown)>-15?'good':'bad',
-    'm-sortino','Sortino: '+m.sortino);
-  setMetric('m-wr', m.win_rate+'%', parseFloat(m.win_rate)>50?'good':'warn',
-    'm-trades','Trades: '+m.num_trades);
+  const sharpe   = parseFloat(m.sharpe ?? 0);
+  const totalRet = parseFloat(m.total_return ?? 0);
+  const mdd      = parseFloat(m.max_drawdown ?? 0);
+  const wr       = parseFloat(m.win_rate ?? 0);
+  setMetric('m-sharpe', sharpe.toFixed(2), sharpe>1.5?'good':sharpe>1?'warn':'bad', 'm-sharpe-sub', sharpe>1.5?'Excellent':sharpe>1?'Good':'Below target');
+  setMetric('m-return', (totalRet>=0?'+':'')+totalRet.toFixed(1)+'%', totalRet>=0?'good':'bad', 'm-cagr', 'CAGR: '+(parseFloat(m.cagr||0)>=0?'+':'')+parseFloat(m.cagr||0).toFixed(1)+'%');
+  setMetric('m-dd', mdd.toFixed(1)+'%', mdd>-15?'good':'bad', 'm-sortino', 'Sortino: '+parseFloat(m.sortino||0).toFixed(2));
+  setMetric('m-wr', wr.toFixed(1)+'%', wr>50?'good':'warn', 'm-trades', 'Trades: '+(m.num_trades||0));
 
   // Right panel
-  document.getElementById('rp-calmar').textContent  = m.calmar ?? '—';
-  document.getElementById('rp-pf').textContent      = m.profit_factor ?? '—';
-  document.getElementById('rp-aw').textContent      = (m.avg_win>0?'+':'')+m.avg_win+'%';
-  document.getElementById('rp-al').textContent      = m.avg_loss+'%';
-  document.getElementById('rp-avol').textContent    = m.ann_volatility+'%';
-  const exp = ((m.win_rate/100)*m.avg_win + ((1-m.win_rate/100)*m.avg_loss)).toFixed(2);
-  document.getElementById('rp-exp').textContent = (exp>0?'+':'')+exp+'%';
-
-  const cap = parseFloat(document.getElementById('sl-capital').value);
-  const pv  = cap * (1 + m.total_return/100);
-  document.getElementById('rp-pv').textContent   = '$'+pv.toLocaleString(undefined,{maximumFractionDigits:0});
+  const pv = cap * (1 + totalRet/100);
+  document.getElementById('rp-pv').textContent   = '$'+Math.round(pv).toLocaleString();
   document.getElementById('rp-pv').className     = 'stat-val '+(pv>cap?'g':'r');
-  document.getElementById('rp-cash').textContent = '$'+Math.floor(pv*0.65).toLocaleString();
-  document.getElementById('rp-upnl').textContent = (m.total_return>=0?'+':'')+m.total_return+'%';
-  document.getElementById('rp-rpnl').textContent = '$'+Math.floor(pv-cap).toLocaleString();
+  document.getElementById('rp-cash').textContent = '$'+Math.round(pv*0.65).toLocaleString();
+  document.getElementById('rp-upnl').textContent = (totalRet>=0?'+':'')+totalRet.toFixed(1)+'%';
+  document.getElementById('rp-upnl').className   = 'stat-val '+(totalRet>=0?'g':'r');
+  document.getElementById('rp-rpnl').textContent = '$'+Math.round(pv-cap).toLocaleString();
+  document.getElementById('rp-rpnl').className   = 'stat-val '+(pv>=cap?'g':'r');
+  document.getElementById('rp-calmar').textContent = parseFloat(m.calmar||0).toFixed(2);
+  document.getElementById('rp-pf').textContent     = parseFloat(m.profit_factor||0).toFixed(2);
+  document.getElementById('rp-aw').textContent     = '+'+parseFloat(m.avg_win||0).toFixed(2)+'%';
+  document.getElementById('rp-al').textContent     = parseFloat(m.avg_loss||0).toFixed(2)+'%';
+  document.getElementById('rp-avol').textContent   = parseFloat(m.ann_volatility||0).toFixed(1)+'%';
+  const exp = (wr/100)*parseFloat(m.avg_win||0) + ((1-wr/100)*parseFloat(m.avg_loss||0));
+  document.getElementById('rp-exp').textContent = (exp>=0?'+':'')+exp.toFixed(2)+'%';
 
-  // Equity chart
+  // Equity charts — always build from scratch so they always render
   const eq = data.equity_curve;
-  if (eq && eqChartInst) {
-    eqChartInst.data.labels = eq.dates;
-    eqChartInst.data.datasets[0].data = eq.values;
-    eqChartInst.update();
-    window._eqData = { portfolio: eq.values, stocks: eq.values, crypto: eq.values, bh: eq.values, labels: eq.dates };
-  } else if (eq) {
+  if (eq && eq.dates && eq.values && eq.values.length > 0) {
     buildEquityChart(eq.dates, eq.values, eq.values);
+    buildEquityChart2(eq.dates, eq.values);
+    buildDDChart(eq.dates, eq.values);
+    window._eqData = { portfolio:eq.values, stocks:eq.values, crypto:eq.values, bh:eq.values, labels:eq.dates };
   }
 
+  // Signals — fetch live from backend
+  const activeSymbols = [...document.querySelectorAll('#asset-tags .tag.active')].map(t=>t.dataset.sym);
+  fetch(API_BASE + '/api/signals', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ symbols: activeSymbols })
+  }).then(r=>r.json()).then(signals => {
+    const grid = document.getElementById('signal-grid');
+    grid.innerHTML = '';
+    if (!signals || !signals.length) { buildSignals(); return; }
+    signals.forEach(a => {
+      const label = a.signal===1?'LONG':a.signal===-1?'SHORT':'HOLD';
+      const cls   = a.signal===1?'long':a.signal===-1?'short':'hold';
+      const chg   = parseFloat(a.chg_pct||0);
+      const conf  = Math.round(Math.max(a.p_long||0, a.p_short||0, a.p_hold||0)*100);
+      const fillCol = a.signal===1?'#00d4aa':a.signal===-1?'#ff4d6a':'#3d5068';
+      const votes   = Object.entries(a.votes||{}).map(([k,v])=>`<span style="font-size:9px;color:var(--text3)">${k.toUpperCase()} ${Math.round(v*100)}%</span>`).join('');
+      grid.innerHTML += `<div class="sig-card ${cls} fade-in">
+        <div class="sig-sym">${a.symbol}</div>
+        <div class="sig-price">$${parseFloat(a.price||0).toLocaleString(undefined,{maximumFractionDigits:2})} <span style="color:${chg>=0?'var(--accent)':'var(--red)'}">${chg>=0?'+':''}${chg.toFixed(2)}%</span></div>
+        <span class="sig-badge ${cls}">${label}</span>
+        <div class="sig-conf">Confidence: ${conf}%</div>
+        <div class="conf-bar"><div class="conf-fill" style="width:${conf}%;background:${fillCol}"></div></div>
+        <div style="display:flex;gap:6px;margin-top:8px">${votes}</div>
+      </div>`;
+    });
+  }).catch(() => buildSignals());
+
   // Trades table
-  if (data.trades?.length) {
-    const tbody = document.getElementById('trade-tbody');
-    tbody.innerHTML = '';
-    data.trades.slice(0,50).forEach(t => {
+  const tbody = document.getElementById('trade-tbody');
+  tbody.innerHTML = '';
+  if (data.trades && data.trades.length) {
+    data.trades.slice(0,100).forEach(t => {
       const pnl = parseFloat(t.pnl||0);
-      const dir = t.direction===1 ? 1 : -1;
-      const tr = document.createElement('tr');
+      const dir = parseInt(t.direction||1);
+      const tr  = document.createElement('tr');
       tr.innerHTML = `
-        <td style="color:var(--text)">${t.symbol||t.sym||'—'}</td>
+        <td style="color:var(--text)">${t.symbol||'—'}</td>
         <td class="${dir===1?'dir-long':'dir-short'}">${dir===1?'LONG':'SHORT'}</td>
-        <td>${t.entry_date||t.date||'—'}</td>
-        <td>${t.exit_date||'—'}</td>
+        <td>${(t.entry_date||t.date||'—').toString().slice(0,10)}</td>
+        <td>${(t.exit_date||'open').toString().slice(0,10)}</td>
         <td>$${parseFloat(t.entry_price||0).toFixed(2)}</td>
         <td>$${parseFloat(t.exit_price||0).toFixed(2)}</td>
-        <td class="${pnl>=0?'pnl-pos':'pnl-neg'}">${pnl>=0?'+':''}$${pnl.toFixed(0)}</td>
+        <td class="${pnl>=0?'pnl-pos':'pnl-neg'}">${pnl>=0?'+':''}$${Math.round(pnl)}</td>
         <td style="color:var(--text3)">${t.exit_reason||'—'}</td>`;
       tbody.appendChild(tr);
     });
+  } else {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--text3)">No trades — check data period is 2y or more</td></tr>';
   }
 
-  // Walk-forward
-  if (data.walk_forward?.length && wfChartInst) {
-    wfChartInst.data.labels   = data.walk_forward.map(r=>r.window?.slice(0,7)||'');
-    wfChartInst.data.datasets[0].data = data.walk_forward.map(r=>r.sharpe);
-    wfChartInst.data.datasets[0].backgroundColor = data.walk_forward.map(r=>
-      r.sharpe>=1.5?'rgba(0,212,170,.6)':r.sharpe>=1?'rgba(255,184,48,.6)':'rgba(255,77,106,.6)');
-    wfChartInst.update();
-
-    // WF mini bars in right panel
-    const el = document.getElementById('wf-mini'); el.innerHTML='';
-    const max = Math.max(...data.walk_forward.map(r=>r.sharpe));
-    data.walk_forward.slice(-5).forEach(r => {
-      const col = r.sharpe>=1.5?'#00d4aa':r.sharpe>=1?'#ffb830':'#ff4d6a';
-      el.innerHTML+=`<div class="wf-bar-row">
-        <div class="wf-label">${r.window?.slice(0,7)||''}</div>
-        <div class="wf-bar"><div class="wf-fill" style="width:${(r.sharpe/max*100).toFixed(0)}%;background:${col}"></div></div>
-        <div class="wf-val" style="color:${col}">${r.sharpe.toFixed(2)}</div>
-      </div>`;
+  // Walk-forward — always build from scratch
+  if (data.walk_forward && data.walk_forward.length > 0) {
+    if (wfChartInst) { wfChartInst.destroy(); wfChartInst = null; }
+    const wfCtx  = document.getElementById('wfChart').getContext('2d');
+    const wfLbls = data.walk_forward.map(r => (r.window||'').slice(0,10));
+    const wfVals = data.walk_forward.map(r => parseFloat(r.sharpe||0));
+    wfChartInst = new Chart(wfCtx, {
+      type:'bar',
+      data:{ labels:wfLbls, datasets:[{ data:wfVals,
+        backgroundColor: wfVals.map(v=>v>=1.5?'rgba(0,212,170,.6)':v>=1?'rgba(255,184,48,.6)':'rgba(255,77,106,.6)'),
+        borderRadius:3 }] },
+      options:{ responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{callbacks:{label:c=>'Sharpe: '+c.raw.toFixed(2)}} },
+        scales:{ x:{ticks:{color:'#3d5068',font:{size:10,family:'IBM Plex Mono'}},grid:{display:false}},
+                 y:{min:0,max:3,ticks:{stepSize:1,color:'#3d5068',font:{size:10,family:'IBM Plex Mono'}},grid:{color:'rgba(255,255,255,.04)'}} } }
     });
+    const wfEl = document.getElementById('wf-mini');
+    wfEl.innerHTML = '';
+    const wfMax = Math.max(...wfVals, 0.1);
+    data.walk_forward.slice(-6).forEach(r => {
+      const s = parseFloat(r.sharpe||0);
+      const col = s>=1.5?'#00d4aa':s>=1?'#ffb830':'#ff4d6a';
+      wfEl.innerHTML += `<div class="wf-bar-row">
+        <div class="wf-label">${(r.window||'').slice(0,7)}</div>
+        <div class="wf-bar"><div class="wf-fill" style="width:${Math.round(s/wfMax*100)}%;background:${col}"></div></div>
+        <div class="wf-val" style="color:${col}">${s.toFixed(2)}</div></div>`;
+    });
+  } else {
+    document.getElementById('wf-mini').innerHTML = '<div style="font-size:10px;color:var(--text3);padding:4px 0">Use 5y period for walk-forward</div>';
   }
 
-  buildMonthChart(); buildFeatChart(); buildEnsembleChart();
+  buildRegChart(); buildFeatChart(); buildEnsembleChart(); buildMonthChart();
 }
+
 
 // Override paper trading to use real API + WebSocket
 const _origRunPaper = window.runPaper;
