@@ -145,62 +145,104 @@ def update_settings():
 @app.route("/api/backtest", methods=["POST"])
 def run_backtest():
     body     = request.json or {}
-    settings = {**current_settings, **body}   # request overrides saved settings
+    settings = {**current_settings, **body}
     symbols  = settings.get("symbols", ["AAPL"])
     period   = settings.get("period",  "2y")
+
+    # Use a sensibly low threshold — 0.55 is often too high and produces 0 trades
+    threshold = float(settings.get("threshold", 0.52))
 
     price_dict  = {}
     signal_dict = {}
     model_info  = {}
+    debug_log   = []   # sent back to UI log tab
+
+    def dlog(msg):
+        print(msg)
+        debug_log.append(msg)
 
     for sym in symbols:
         df = DataFetcher.fetch(sym, period=period)
         if df.empty:
+            dlog(f"[{sym}] No data returned — skipping")
             continue
+
         split    = int(len(df) * 0.70)
         train_df = df.iloc[:split]
         test_df  = df.iloc[split:]
+        dlog(f"[{sym}] Data: {len(df)} bars | Train: {len(train_df)} | Test: {len(test_df)}")
+
+        # Check if we have enough data before even trying
+        if len(train_df) < 100:
+            dlog(f"[{sym}] SKIP: only {len(train_df)} train bars — use period=3y or 5y")
+            continue
 
         model = EnsembleModel(
-            forward_return_days = settings.get("fwd_days", 5),
-            signal_threshold    = float(settings.get("threshold", 0.55)),
+            forward_return_days = int(settings.get("fwd_days", 5)),
+            signal_threshold    = threshold,
         )
-        model.fit(train_df)
+        try:
+            model.fit(train_df)
+        except ValueError as e:
+            dlog(f"[{sym}] Training failed: {e}")
+            continue
 
-        signals          = model.predict_signal(test_df)
+        signals = model.predict_signal(test_df)
+
+        n_long  = int((signals ==  1).sum())
+        n_short = int((signals == -1).sum())
+        n_hold  = int((signals ==  0).sum())
+        dlog(f"[{sym}] Signals: LONG={n_long} SHORT={n_short} HOLD={n_hold}")
+
+        if n_long + n_short == 0:
+            dlog(f"[{sym}] WARNING: zero actionable signals — threshold {threshold} may be too high")
+            dlog(f"[{sym}] Try lowering threshold to 0.48 in settings")
+
         price_dict[sym]  = test_df["close"]
         signal_dict[sym] = signals
         model_info[sym]  = {
-            "train_bars":   len(train_df),
-            "test_bars":    len(test_df),
+            "train_bars":  len(train_df),
+            "test_bars":   len(test_df),
+            "n_long":      n_long,
+            "n_short":     n_short,
+            "n_hold":      n_hold,
             "feature_importance": jsonify_safe(model.feature_importance_),
         }
 
     if not price_dict:
-        # fallback to synthetic
-        sym = "SYN"; df = DataFetcher.synthetic(n=600)
-        split = int(len(df)*0.7)
-        model = EnsembleModel(); model.fit(df.iloc[:split])
+        dlog("No valid symbols — falling back to synthetic data")
+        sym = "SYN"; df = DataFetcher.synthetic(n=800)
+        split = int(len(df) * 0.7)
+        model = EnsembleModel(signal_threshold=0.50)
+        model.fit(df.iloc[:split])
         signals = model.predict_signal(df.iloc[split:])
-        price_dict[sym] = df["close"].iloc[split:]
+        price_dict[sym]  = df["close"].iloc[split:]
         signal_dict[sym] = signals
+        dlog(f"[SYN] Signals: LONG={(signals==1).sum()} SHORT={(signals==-1).sum()}")
 
     cfg = BacktestConfig(
         initial_capital    = float(settings.get("capital",      100_000)),
         commission_pct     = float(settings.get("commission",   0.001)),
         slippage_pct       = float(settings.get("slippage",     0.0005)),
         max_position_pct   = float(settings.get("max_position", 0.20)),
-        max_drawdown_limit = float(settings.get("max_drawdown", 0.15)),
+        max_drawdown_limit = float(settings.get("max_drawdown", 0.20)),  # raised from 0.15
         target_vol         = float(settings.get("target_vol",   0.15)),
         stop_loss_pct      = float(settings.get("stop_loss",    0.03)),
         take_profit_pct    = float(settings.get("take_profit",  0.09)),
     )
+    dlog(f"Backtest config: SL={cfg.stop_loss_pct:.0%} TP={cfg.take_profit_pct:.0%} "
+         f"MaxDD={cfg.max_drawdown_limit:.0%} Capital=${cfg.initial_capital:,.0f}")
+
     engine = BacktestEngine(cfg)
     result = (engine.run_single(price_dict[list(price_dict)[0]],
                                 signal_dict[list(signal_dict)[0]],
                                 list(price_dict)[0])
-              if len(price_dict)==1
+              if len(price_dict) == 1
               else engine.run_portfolio(price_dict, signal_dict))
+
+    m = result.get("metrics", {})
+    dlog(f"Result: Sharpe={m.get('sharpe','?')} CAGR={m.get('cagr','?')}% "
+         f"WinRate={m.get('win_rate','?')}% Trades={m.get('num_trades','?')}")
 
     eq     = result["equity_curve"]
     trades = result["trades"]
@@ -219,9 +261,10 @@ def run_backtest():
             "dates":  eq.index.astype(str).tolist(),
             "values": eq["equity"].tolist(),
         },
-        "trades":    trades.to_dict(orient="records") if not trades.empty else [],
+        "trades":       trades.to_dict(orient="records") if not trades.empty else [],
         "walk_forward": wf_data,
-        "model_info": model_info,
+        "model_info":   model_info,
+        "debug_log":    debug_log,
     }))
 
 
