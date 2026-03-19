@@ -41,7 +41,7 @@ ws_lock    = threading.Lock()
 
 DEFAULT_SETTINGS = {
     "capital":       100_000,
-    "period":        "2y",
+    "period":        "max",
     "stop_loss":     0.03,
     "take_profit":   0.09,
     "target_vol":    0.15,
@@ -51,7 +51,7 @@ DEFAULT_SETTINGS = {
     "commission":    0.001,
     "slippage":      0.0005,
     "kelly":         0.25,
-    "symbols":       ["AAPL", "MSFT", "BTC-USD"],
+    "symbols":       ["AAPL", "MSFT", "BTC-USD", "GC=F"],
 }
 SETTINGS_FILE = "settings.json"
 

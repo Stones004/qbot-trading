@@ -12,6 +12,12 @@ except ImportError:
 
 
 class DataFetcher:
+    # Approximate bar counts for "max" period (as of 2026):
+    # AAPL:    ~11,000 bars (1980-2026) — 45 years of regimes
+    # MSFT:    ~10,000 bars (1986-2026)
+    # BTC-USD: ~3,500  bars (2014-2026) — all crypto regimes
+    # GC=F:    ~13,000 bars (1975-2026) — gold through every macro cycle
+
     @staticmethod
     def fetch(symbol: str, period: str = "2y", interval: str = "1d",
               force_refresh: bool = False) -> pd.DataFrame:

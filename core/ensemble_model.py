@@ -1,10 +1,20 @@
 """
 core/ensemble_model.py
-Fixed version — addresses all known causes of Sharpe = 0:
-  1. Too few signals (threshold too high)
-  2. Label imbalance (too many HOLD)
-  3. Empty feature matrix after NaN fill
-  4. CV folds too small to train
+Fixed for mean-reversion markets (AAPL 2021-2026).
+
+Key insight from diagnostics:
+- Features have strong NEGATIVE correlation with 5-day forward returns
+- This means: when RSI is high / price is above SMA / momentum is strong
+  → price tends to FALL over next 5 days (mean reversion)
+- The model must learn this counter-trend pattern
+
+Fixes applied:
+1. Contrarian label encoding: positive features → SHORT signal
+   (handled by letting XGBoost learn the negative correlations naturally)
+2. Removed class_weight='balanced' — was over-correcting and collapsing meta-learner
+3. Raised C from 0.3 to 1.0 — less regularisation so meta-learner can actually learn
+4. Added direct base-model voting fallback if meta-learner collapses
+5. Reduced min_child_weight so trees can split on mean-reversion patterns
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +23,6 @@ warnings.filterwarnings('ignore')
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.linear_model import LogisticRegression
-from sklearn.calibration import CalibratedClassifierCV
 from core.feature_engineer import FeatureEngineer
 
 try:
@@ -28,21 +37,19 @@ except ImportError:
 
 
 class EnsembleModel:
-    # pos_52w needs 252-bar lookback — 72% NaN on 2y datasets, degrades signal
-    FEATURE_COLS = [c for c in FeatureEngineer.FEATURE_COLS if c != 'pos_52w']
+    FEATURE_COLS = FeatureEngineer.FEATURE_COLS
 
     def __init__(self, n_splits=5, forward_return_days=5,
-                 signal_threshold=0.40,   # tuned: meta-learner tops out ~0.45 on 2y data
-                 label_threshold=0.003):  # ±0.3% to define long/short
+                 signal_threshold=0.40,
+                 label_threshold=0.003):
         self.n_splits        = n_splits
         self.fwd_days        = forward_return_days
         self.threshold       = signal_threshold
         self.label_threshold = label_threshold
         self.scaler          = StandardScaler()
-        self.meta            = LogisticRegression(
-            max_iter=2000, C=0.3,          # stronger regularisation
-            class_weight='balanced',        # fix label imbalance
-            solver='lbfgs'
+        # No class_weight, higher C — was collapsing to uniform predictions
+        self.meta = LogisticRegression(
+            max_iter=2000, C=1.0, solver='lbfgs'
         )
         self.models          = self._init_models()
         self.is_fitted       = False
@@ -53,17 +60,21 @@ class EnsembleModel:
         m = {}
         if XGB_AVAILABLE:
             m['xgb'] = xgb.XGBClassifier(
-                n_estimators=300, max_depth=4, learning_rate=0.04,
-                subsample=0.75, colsample_bytree=0.75,
-                min_child_weight=5,        # prevent overfitting on small folds
+                n_estimators=300, max_depth=3,   # shallower = less overfit
+                learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8,
+                min_child_weight=3,              # reduced: 878 rows can handle finer splits
+                gamma=0.1,                       # minimum gain to split — prevents noise splits
                 use_label_encoder=False,
                 eval_metric='mlogloss',
                 random_state=42, n_jobs=-1, verbosity=0)
         if LGB_AVAILABLE:
             m['lgb'] = lgb.LGBMClassifier(
-                n_estimators=300, max_depth=4, learning_rate=0.04,
-                subsample=0.75, colsample_bytree=0.75,
-                min_child_samples=10,
+                n_estimators=300, max_depth=3,
+                learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8,
+                min_child_samples=15,
+                reg_alpha=0.1,                   # L1 regularisation
                 random_state=42, n_jobs=-1, verbose=-1)
         if not m:
             from sklearn.ensemble import GradientBoostingClassifier
@@ -80,7 +91,6 @@ class EnsembleModel:
 
     @staticmethod
     def _clean(feat: pd.DataFrame) -> pd.DataFrame:
-        """ffill → bfill → zero-fill. Never leaves NaN for StandardScaler."""
         return feat.ffill().bfill().fillna(0)
 
     def fit(self, df: pd.DataFrame):
@@ -88,14 +98,12 @@ class EnsembleModel:
         labels, _ = self._make_labels(df)
         feat      = self._clean(df[self.FEATURE_COLS].copy())
 
-        # Only drop rows where the forward return itself is NaN
         valid = ~np.isnan(labels)
         mask  = valid & feat.notna().all(axis=1)
 
         if mask.sum() < 50:
             raise ValueError(
-                f"Only {mask.sum()} usable training rows. "
-                "Use period='3y' or '5y' for enough data."
+                f"Only {mask.sum()} usable rows. Use period='3y' or '5y'."
             )
 
         X  = feat[mask].values
@@ -103,15 +111,11 @@ class EnsembleModel:
         Xs = self.scaler.fit_transform(X)
         self._train_rows = len(X)
 
-        # Print label distribution so user can see what the model works with
         unique, counts = np.unique(y, return_counts=True)
-        dist = dict(zip(unique, counts))
+        dist = dict(zip(unique.tolist(), counts.tolist()))
         print(f"[EnsembleModel] Training on {len(X)} rows | "
-              f"Labels: SHORT={dist.get(-1,0)} "
-              f"HOLD={dist.get(0,0)} "
-              f"LONG={dist.get(1,0)}")
+              f"SHORT={dist.get(-1,0)} HOLD={dist.get(0,0)} LONG={dist.get(1,0)}")
 
-        # Adaptive CV splits — never make folds smaller than 40 rows
         n_splits = min(self.n_splits, max(2, mask.sum() // 80))
         tscv     = TimeSeriesSplit(n_splits=n_splits)
         n_models = len(self.models)
@@ -125,23 +129,28 @@ class EnsembleModel:
                     model.fit(Xs[tr], y[tr] + 1)
                     oof[val, i*3:(i+1)*3] = model.predict_proba(Xs[val])
                 except Exception as e:
-                    print(f"  [warn] fold {fold_idx} {name} failed: {e}")
+                    print(f"  [warn] fold {fold_idx} {name}: {e}")
                     oof[val, i*3:(i+1)*3] = 1/3
 
-        # Retrain base models on full data
         for name, model in self.models.items():
             model.fit(Xs, y + 1)
             if hasattr(model, 'feature_importances_'):
                 self.feature_importance_[name] = dict(
                     zip(self.FEATURE_COLS, model.feature_importances_))
 
-        # Train meta-learner — balanced class_weight handles skewed labels
         valid_oof = np.any(oof != 0, axis=1)
-        if valid_oof.sum() > 20:
+        n_valid   = valid_oof.sum()
+        if n_valid > 20:
             self.meta.fit(oof[valid_oof], y[valid_oof] + 1)
         else:
             self.meta.fit(oof, y + 1)
 
+        # Sanity check: does meta-learner output spread?
+        meta_proba = self.meta.predict_proba(oof[valid_oof] if n_valid > 20 else oof)
+        max_conf   = meta_proba.max(axis=1).mean()
+        print(f"[EnsembleModel] Meta-learner avg max confidence: {max_conf:.3f} "
+              f"({'OK' if max_conf > 0.38 else 'COLLAPSED — using direct vote'})")
+        self._meta_collapsed = max_conf < 0.38
         self.is_fitted = True
         return self
 
@@ -154,8 +163,22 @@ class EnsembleModel:
             stacked[:, i*3:(i+1)*3] = model.predict_proba(Xs)
         return stacked
 
+    def _predict_proba_from_stack(self, stacked: np.ndarray) -> np.ndarray:
+        """
+        If meta-learner collapsed, fall back to averaging base model probabilities.
+        This bypasses the broken logistic regression layer.
+        """
+        if self._meta_collapsed:
+            # Average base model probabilities directly
+            n_models = len(self.models)
+            avg = np.zeros((len(stacked), 3))
+            for i in range(n_models):
+                avg += stacked[:, i*3:(i+1)*3]
+            return avg / n_models
+        return self.meta.predict_proba(stacked)
+
     def predict_signal(self, df: pd.DataFrame) -> pd.Series:
-        assert self.is_fitted, "Call fit() first."
+        assert self.is_fitted
         df   = FeatureEngineer.add_features(df)
         feat = self._clean(df[self.FEATURE_COLS].copy())
         mask = feat.notna().all(axis=1)
@@ -165,29 +188,25 @@ class EnsembleModel:
             return signal
 
         stacked = self._stack(feat[mask].values)
-        proba   = self.meta.predict_proba(stacked)   # shape (N, 3): short/hold/long
+        proba   = self._predict_proba_from_stack(stacked)
 
-        # Map class indices: 0=short(-1), 1=hold(0), 2=long(1)
-        # Only signal when confidence exceeds threshold
         raw = np.zeros(len(stacked), dtype=int)
         for j in range(len(stacked)):
             p_short, p_hold, p_long = proba[j]
-            if p_long  >= self.threshold:
-                raw[j] =  1
-            elif p_short >= self.threshold:
-                raw[j] = -1
-            # else stay 0 (hold)
+            if   p_long  >= self.threshold: raw[j] =  1
+            elif p_short >= self.threshold: raw[j] = -1
 
         signal[mask] = raw
-        n_long  = (raw ==  1).sum()
-        n_short = (raw == -1).sum()
-        n_hold  = (raw ==  0).sum()
-        print(f"[EnsembleModel] Signals on {mask.sum()} bars: "
+        n_long  = int((raw ==  1).sum())
+        n_short = int((raw == -1).sum())
+        n_hold  = int((raw ==  0).sum())
+        mode    = "direct avg" if self._meta_collapsed else "meta-learner"
+        print(f"[EnsembleModel] Signals ({mode}): "
               f"LONG={n_long} SHORT={n_short} HOLD={n_hold}")
         return signal
 
     def predict_proba_all(self, df: pd.DataFrame) -> pd.DataFrame:
-        assert self.is_fitted, "Call fit() first."
+        assert self.is_fitted
         df   = FeatureEngineer.add_features(df)
         feat = self._clean(df[self.FEATURE_COLS].copy())
         mask = feat.notna().all(axis=1)
@@ -200,6 +219,7 @@ class EnsembleModel:
         if mask.sum() == 0:
             return result
 
-        proba = self.meta.predict_proba(self._stack(feat[mask].values))
+        stacked = self._stack(feat[mask].values)
+        proba   = self._predict_proba_from_stack(stacked)
         result.loc[mask, ['p_short', 'p_hold', 'p_long']] = proba
         return result
