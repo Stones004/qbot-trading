@@ -47,7 +47,7 @@ DEFAULT_SETTINGS = {
     "target_vol":    0.15,
     "max_drawdown":  0.15,
     "max_position":  0.20,
-    "threshold":     0.55,
+    "threshold":     0.40,
     "commission":    0.001,
     "slippage":      0.0005,
     "kelly":         0.25,
@@ -150,7 +150,7 @@ def run_backtest():
     period   = settings.get("period",  "2y")
 
     # Use a sensibly low threshold — 0.55 is often too high and produces 0 trades
-    threshold = float(settings.get("threshold", 0.52))
+    threshold = float(settings.get("threshold", 0.40))
 
     price_dict  = {}
     signal_dict = {}

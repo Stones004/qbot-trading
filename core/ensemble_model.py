@@ -28,10 +28,11 @@ except ImportError:
 
 
 class EnsembleModel:
-    FEATURE_COLS = FeatureEngineer.FEATURE_COLS
+    # pos_52w needs 252-bar lookback — 72% NaN on 2y datasets, degrades signal
+    FEATURE_COLS = [c for c in FeatureEngineer.FEATURE_COLS if c != 'pos_52w']
 
     def __init__(self, n_splits=5, forward_return_days=5,
-                 signal_threshold=0.52,   # lowered from 0.55 — was blocking all signals
+                 signal_threshold=0.40,   # tuned: meta-learner tops out ~0.45 on 2y data
                  label_threshold=0.003):  # ±0.3% to define long/short
         self.n_splits        = n_splits
         self.fwd_days        = forward_return_days
@@ -41,7 +42,7 @@ class EnsembleModel:
         self.meta            = LogisticRegression(
             max_iter=2000, C=0.3,          # stronger regularisation
             class_weight='balanced',        # fix label imbalance
-            solver='lbfgs', multi_class='auto'
+            solver='lbfgs'
         )
         self.models          = self._init_models()
         self.is_fitted       = False
