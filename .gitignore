@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Bot state (don't commit live trading state)
+paper_state.json
+settings.json
+data/cache/*.parquet
+equity_curve.csv
+trades.csv
+metrics.json
+walk_forward.csv
+
+# Models (large, rebuild on deploy)
+models/saved/*.pkl
+models/saved/*.pt
+models/saved/*.json
+
+# Secrets
+.env
+*.key
+*.pem
+secrets.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
