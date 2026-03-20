@@ -279,7 +279,7 @@ def get_signals():
         df = DataFetcher.fetch(sym, period=period)
         if df.empty:
             continue
-        model = EnsembleModel(signal_threshold=float(current_settings.get("threshold", 0.55)))
+        model = EnsembleModel(signal_threshold=float(current_settings.get("threshold", 0.40)))
         model.fit(df.iloc[:int(len(df)*0.8)])
         proba  = model.predict_proba_all(df).iloc[-1]
         signal = int(model.predict_signal(df).iloc[-1])
